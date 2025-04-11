@@ -6,7 +6,7 @@ pub(crate) enum Id {
     String(String),
 }
 
-pub(crate) type JSONRPCId = Option<i32>;
+pub(crate) type JSONRPCId = i32;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct JSONRPCRequest {

@@ -36,7 +36,7 @@ pub(crate) struct Tool {
     pub(crate) name: String,
     pub(crate) description: String,
     #[serde(rename = "inputSchema")]
-    pub(crate) input_schema: Option<Vec<u8>>,
+    pub(crate) input_schema: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]

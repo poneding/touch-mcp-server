@@ -8,39 +8,43 @@ use mcp::{CallToolsResult, InitializeResult};
 use mcp::{ListPromptsResult, ToolContent};
 use std::env;
 use std::fs::OpenOptions;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, Write};
 use std::path::Path;
 mod jsonrpc;
 mod mcp;
 
 fn main() {
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut reader = BufReader::new(stdin);
-    let mut writer = stdout.lock();
-
     log("starting\n", &[]);
 
-    loop {
-        let mut input = String::new();
-        if reader.read_line(&mut input).is_err() {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let handle = stdin.lock();
+    let mut writer = stdout.lock();
+
+    for line in handle.lines() {
+        let Some(line) = line.ok() else {
             on_error(
                 &mut writer,
                 None,
                 PARSE_ERROR,
                 "failed to read input".to_string(),
             );
-            break;
+            continue;
+        };
+        if line.trim().is_empty() {
+            log("empty line\n", &[]);
+            continue;
         }
 
-        let request: jsonrpc::JSONRPCRequest = match serde_json::from_str(input.as_str()) {
+        log("input: {}", &[&line]);
+
+        let request: jsonrpc::JSONRPCRequest = match serde_json::from_str(line.as_str()) {
             Ok(req) => req,
             Err(err) => {
                 on_error(&mut writer, None, PARSE_ERROR, err.to_string());
-                break;
+                continue;
             }
         };
-        input.clear();
 
         log(
             ">> Request: \n{}\n",
@@ -55,56 +59,67 @@ fn main() {
                 INVALID_REQUEST,
                 "Invalid JSON-RPC version".to_string(),
             );
-            break;
+            continue;
         }
 
         let id = request.id;
 
-        let response = match request.method.as_str() {
-            "initialize" => Some(JSONRPCResponse::from_result(
-                id.unwrap(),
-                serde_json::to_value(InitializeResult::new()).ok(),
-            )),
-            "notifications/initialized" | "initialized" => None,
-            "tools/list" => Some(JSONRPCResponse::from_result(
-                id.unwrap(),
-                serde_json::to_value(ListToolsResult::new(Some(vec![Tool {
-                    name: "touch-map".to_string(),
-                    description: "创建文件工具".to_string(),
-                    input_schema: Some(
-                        serde_json::json!({
+        let mut resp = None;
+
+        match request.method.as_str() {
+            "initialize" => {
+                resp = Some(JSONRPCResponse::from_result(
+                    id.unwrap(),
+                    serde_json::to_value(InitializeResult::new()).ok(),
+                ))
+            }
+            "notifications/initialized"
+            | "initialized"
+            | "notifications/cancelled"
+            | "cancelled" => {}
+            "tools/list" => {
+                resp = Some(JSONRPCResponse::from_result(
+                    id.unwrap(),
+                    serde_json::to_value(ListToolsResult::new(Some(vec![Tool {
+                        name: "touch-mcp".to_string(),
+                        description: "创建文件工具".to_string(),
+                        input_schema: Some(serde_json::json!({
                             "type": "object",
                             "properties": {
-                                "file": {
-                                    "type": "string",
-                                    "description": "文件名"
-                                },
-                                "destPath": {
-                                    "type": "string",
-                                    "description": "文件路径"
-                                }
+                              "file": {
+                                "type": "string",
+                                "description": "文件名"
+                              },
+                              "destPath": {
+                                "type": "string",
+                                "description": "目标路径"
+                              }
                             },
-                            "required": ["file_name", "file_content"]
-                        })
-                        .to_string()
-                        .into(),
-                    ),
-                }])))
-                .ok(),
-            )), // 工具列表
-            "resources/list" => Some(JSONRPCResponse::from_result(
-                id.unwrap(),
-                serde_json::to_value(ListResourcesResult::new(vec![])).ok(),
-            )), // 可访问资源列表
-            "prompts/list" => Some(JSONRPCResponse::from_result(
-                id.unwrap(),
-                serde_json::to_value(ListPromptsResult::new(vec![])).ok(),
-            )), // 特定任务的预定义提示模版
+                            "required": [
+                              "file"
+                            ]
+                        })),
+                    }])))
+                    .ok(),
+                ))
+            } // 工具列表
+            "resources/list" => {
+                resp = Some(JSONRPCResponse::from_result(
+                    id.unwrap(),
+                    serde_json::to_value(ListResourcesResult::new(vec![])).ok(),
+                ))
+            } // 可访问资源列表
+            "prompts/list" => {
+                resp = Some(JSONRPCResponse::from_result(
+                    id.unwrap(),
+                    serde_json::to_value(ListPromptsResult::new(vec![])).ok(),
+                ))
+            } // 特定任务的预定义提示模版
             "tools/call" => {
                 if let Some(params) = request.params {
                     let params = serde_json::from_value::<Params>(params);
                     if let Ok(params) = params {
-                        if params.name.as_str() == "touch-map" {
+                        if params.name.as_str() == "touch-mcp" {
                             if let Some(args) = params.arguments {
                                 if let Some(f) = args.get("file").and_then(|v| v.as_str()) {
                                     let mut dest_path = args.get("destPath").map(|v| v.to_string());
@@ -116,69 +131,73 @@ fn main() {
                                         }
                                     }
                                     let dest_path = dest_path.unwrap_or("/tmp".to_string());
-                                    let path = Path::new(dest_path.as_str()).join(f);
+                                    let path = Path::new(&dest_path).join(f);
+                                    println!("path: {}", path.display());
                                     let resp = match OpenOptions::new()
                                         .write(true)
                                         .create(true)
                                         .open(&path)
                                     {
-                                        Ok(_) => Some(JSONRPCResponse::from_result(
-                                            id.unwrap(),
-                                            serde_json::to_value(CallToolsResult::new(Some(vec![
-                                                ToolContent {
-                                                    tool_type: "file".to_string(),
-                                                    content: format!(
-                                                        "File created: {}",
-                                                        path.display()
-                                                    ),
-                                                },
-                                            ])))
-                                            .ok(),
-                                        )),
-                                        Err(e) => Some(JSONRPCResponse::from_error_message(
-                                            id,
-                                            INVALID_PARAMS,
-                                            format!("failed to open file: {}", e),
-                                        )),
+                                        Ok(_) => {
+                                            resp = Some(JSONRPCResponse::from_result(
+                                                id.unwrap(),
+                                                serde_json::to_value(CallToolsResult::new(Some(
+                                                    vec![ToolContent {
+                                                        tool_type: "file".to_string(),
+                                                        content: format!(
+                                                            "File created: {}",
+                                                            path.display()
+                                                        ),
+                                                    }],
+                                                )))
+                                                .ok(),
+                                            ))
+                                        }
+                                        Err(e) => {
+                                            resp = Some(JSONRPCResponse::from_error_message(
+                                                id,
+                                                INVALID_PARAMS,
+                                                format!("failed to open file: {}", e),
+                                            ))
+                                        }
                                     };
                                     resp
                                 } else {
-                                    Some(JSONRPCResponse::from_error_message(
+                                    resp = Some(JSONRPCResponse::from_error_message(
                                         id,
                                         INVALID_PARAMS,
                                         "file is required".to_string(),
                                     ))
                                 }
                             } else {
-                                Some(JSONRPCResponse::from_error_message(
+                                resp = Some(JSONRPCResponse::from_error_message(
                                     id,
                                     INVALID_PARAMS,
                                     "arguments is required".to_string(),
                                 ))
                             }
                         } else {
-                            Some(JSONRPCResponse::from_error_message(
+                            resp = Some(JSONRPCResponse::from_error_message(
                                 id,
                                 INVALID_PARAMS,
                                 format!("tool {} not found", params.name),
                             ))
                         }
                     } else {
-                        Some(JSONRPCResponse::from_error_message(
+                        resp = Some(JSONRPCResponse::from_error_message(
                             id,
                             INVALID_PARAMS,
                             "failed to parse params".to_string(),
                         ))
                     }
                 } else {
-                    Some(JSONRPCResponse::from_error_message(
+                    resp = Some(JSONRPCResponse::from_error_message(
                         id,
                         INVALID_PARAMS,
                         "params is required".to_string(),
                     ))
                 }
             }
-            "cancelled" => None,
             _ => {
                 on_error(
                     &mut writer,
@@ -190,9 +209,11 @@ fn main() {
             }
         };
 
-        if let Some(resp) = response {
+        if let Some(resp) = resp {
             on_response(&mut writer, resp);
         }
+        writer.flush().expect("Failed to flush output");
+        log("flushed\n", &[]);
     }
 
     log("exiting\n", &[]);
@@ -214,19 +235,13 @@ fn on_response(writer: &mut impl Write, response: JSONRPCResponse) {
 
     log(">> Response: {}\n", &[&json_resp]);
 
-    if let Err(err) = serde_json::to_writer(&mut *writer, &response) {
-        println!("failed to encode response: {}", err);
-    }
-
-    // 确保响应被发送
-    if let Err(err) = writer.flush() {
-        println!("failed to flush output: {}", err);
+    if let Err(err) = serde_json::to_writer(writer, &response) {
+        log("failed to encode response: {}", &[&err.to_string()]);
     }
 }
 
 fn log(msg: &str, args: &[&str]) {
-    // 确保日志目录存在
-    let log_path = "/Users/dp/touch-map-server.log";
+    let log_path = "/Users/dp/touch-mcp-server.log";
 
     let file = OpenOptions::new()
         .append(true)
@@ -247,7 +262,6 @@ fn log(msg: &str, args: &[&str]) {
     } else {
         let mut result = msg.to_string();
         for arg in args {
-            // 非常简单的替换，生产环境应使用更健壮的实现
             if let Some(pos) = result.find("{}") {
                 result.replace_range(pos..pos + 2, arg);
             }

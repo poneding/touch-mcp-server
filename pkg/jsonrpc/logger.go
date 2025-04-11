@@ -34,30 +34,19 @@ func Log(msg string, args ...any) {
 }
 
 func LogRequest(req Request) {
-	log(">> Request: [%v] %s", req.Id, req.Method)
-	if req.Params != nil {
-		if v, err := json.MarshalIndent(req.Params, "", "  "); err != nil {
-			log("failed to marshal request params: %v\n", err)
-		} else {
-			log("params: \n%s\n", string(v))
-		}
+	log(">> Request:")
+	if v, err := json.MarshalIndent(req, "", "  "); err != nil {
+		log("failed to marshal request: %v", err)
+	} else {
+		log(string(v))
 	}
 }
 
 func LogResponse(resp *Response) {
-	if resp.Result != nil {
-		log(">> Response: [%v] %s", resp.Id, "Succeed")
-		if v, err := json.MarshalIndent(resp.Result, "", "  "); err != nil {
-			log("failed to marshal request params: %v", err)
-		} else {
-			log("Result: \n%s", string(v))
-		}
+	log(">> Response:")
+	if v, err := json.MarshalIndent(resp, "", "  "); err != nil {
+		log("failed to marshal response: %v", err)
 	} else {
-		log("Response: [%v] %s", resp.Id, "Failed")
-		if v, err := json.MarshalIndent(resp.Error, "", "  "); err != nil {
-			log("failed to marshal request params: %v", err)
-		} else {
-			log("Error: \n%s", string(v))
-		}
+		log(string(v))
 	}
 }
