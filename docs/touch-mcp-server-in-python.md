@@ -49,10 +49,10 @@ if __name__ == "__main__":
       "command": "uv",
       "args": [
         "--directory",
-        "/Users/dp/src/touch-mcp-server", // 替换路径
+        "/your/touch-mcp-server/path",
         "run",
         "touch.py"
-      ],
+      ]
     }
   }
 }
