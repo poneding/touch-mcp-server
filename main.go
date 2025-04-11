@@ -22,14 +22,14 @@ func main() {
 		var req jsonrpc.Request
 		if err := decoder.Decode(&req); err != nil {
 			onError(nil, jsonrpc.ParseError, fmt.Sprintf("failed to decode request: %v", err))
-			break
+			continue
 		}
 
 		jsonrpc.LogRequest(req)
 
 		if req.JSONRPC != "2.0" {
 			onError(req.Id, jsonrpc.InvalidRequest, "invalid jsonrpc version")
-			break
+			continue
 		}
 
 		var resp *jsonrpc.Response
@@ -127,7 +127,7 @@ func main() {
 			default:
 				resp = jsonrpc.NewErrorResponse(req.Id, jsonrpc.MethodNotFound, fmt.Sprintf("tool %s not found", toolName))
 			}
-		case "cancelled":
+		case "notifications/cancelled", "cancelled":
 			continue
 		default:
 			onError(req.Id, jsonrpc.MethodNotFound, fmt.Sprintf("method %s not found", req.Method))
@@ -138,9 +138,6 @@ func main() {
 			onResponse(resp)
 		}
 	}
-
-	fmt.Println("touch-mcp-server: exiting")
-	jsonrpc.Log("exiting\n")
 }
 
 func onError(id any, code int, message string) {

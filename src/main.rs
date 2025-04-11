@@ -1,275 +1,281 @@
-use jsonrpc::{INVALID_PARAMS, JSONRPCId, JSONRPCResponse, METHOD_NOT_FOUND};
-use jsonrpc::{INVALID_REQUEST, PARSE_ERROR};
-use mcp::ListResourcesResult;
-use mcp::ListToolsResult;
-use mcp::Params;
-use mcp::Tool;
-use mcp::{CallToolsResult, InitializeResult};
-use mcp::{ListPromptsResult, ToolContent};
+use jsonrpc::*;
+use log::{log_error, log_info, log_request, log_response};
+use mcp::*;
+use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::env;
-use std::fs::OpenOptions;
-use std::io::{self, BufRead, Write};
-use std::path::Path;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Write}; // 使用 BufReader 进行高效的行读取
+use std::path::PathBuf;
 mod jsonrpc;
+mod log;
 mod mcp;
 
 fn main() {
-    log("starting\n", &[]);
+    log_info("starting");
 
     let stdin = io::stdin();
-    let stdout = io::stdout();
-    let handle = stdin.lock();
-    let mut writer = stdout.lock();
+    // 使用 BufReader 逐行读取，每行一个 JSON 对象(JSON-RPC 请求)
+    let reader = BufReader::new(stdin.lock());
+    let mut stdout = io::stdout().lock(); // 锁定 stdout，提高性能
 
-    for line in handle.lines() {
-        let Some(line) = line.ok() else {
-            on_error(
-                &mut writer,
-                None,
-                PARSE_ERROR,
-                "failed to read input".to_string(),
-            );
-            continue;
-        };
-        if line.trim().is_empty() {
-            log("empty line\n", &[]);
-            continue;
-        }
-
-        log("input: {}", &[&line]);
-
-        let request: jsonrpc::JSONRPCRequest = match serde_json::from_str(line.as_str()) {
-            Ok(req) => req,
-            Err(err) => {
-                on_error(&mut writer, None, PARSE_ERROR, err.to_string());
-                continue;
-            }
-        };
-
-        log(
-            ">> Request: \n{}\n",
-            &[&serde_json::to_string_pretty(&request).unwrap()],
-        );
-
-        if request.jsonrpc != "2.0" {
-            let id = request.id;
-            on_error(
-                &mut writer,
-                id,
-                INVALID_REQUEST,
-                "Invalid JSON-RPC version".to_string(),
-            );
-            continue;
-        }
-
-        let id = request.id;
-
-        let mut resp = None;
-
-        match request.method.as_str() {
-            "initialize" => {
-                resp = Some(JSONRPCResponse::from_result(
-                    id.unwrap(),
-                    serde_json::to_value(InitializeResult::new()).ok(),
-                ))
-            }
-            "notifications/initialized"
-            | "initialized"
-            | "notifications/cancelled"
-            | "cancelled" => {}
-            "tools/list" => {
-                resp = Some(JSONRPCResponse::from_result(
-                    id.unwrap(),
-                    serde_json::to_value(ListToolsResult::new(Some(vec![Tool {
-                        name: "touch-mcp".to_string(),
-                        description: "创建文件工具".to_string(),
-                        input_schema: Some(serde_json::json!({
-                            "type": "object",
-                            "properties": {
-                              "file": {
-                                "type": "string",
-                                "description": "文件名"
-                              },
-                              "destPath": {
-                                "type": "string",
-                                "description": "目标路径"
-                              }
-                            },
-                            "required": [
-                              "file"
-                            ]
-                        })),
-                    }])))
-                    .ok(),
-                ))
-            } // 工具列表
-            "resources/list" => {
-                resp = Some(JSONRPCResponse::from_result(
-                    id.unwrap(),
-                    serde_json::to_value(ListResourcesResult::new(vec![])).ok(),
-                ))
-            } // 可访问资源列表
-            "prompts/list" => {
-                resp = Some(JSONRPCResponse::from_result(
-                    id.unwrap(),
-                    serde_json::to_value(ListPromptsResult::new(vec![])).ok(),
-                ))
-            } // 特定任务的预定义提示模版
-            "tools/call" => {
-                if let Some(params) = request.params {
-                    let params = serde_json::from_value::<Params>(params);
-                    if let Ok(params) = params {
-                        if params.name.as_str() == "touch-mcp" {
-                            if let Some(args) = params.arguments {
-                                if let Some(f) = args.get("file").and_then(|v| v.as_str()) {
-                                    let mut dest_path = args.get("destPath").map(|v| v.to_string());
-                                    if dest_path.is_none() {
-                                        dest_path = env::var("DEFAULT_TOUCH_PATH").ok();
-                                        if dest_path.is_none() {
-                                            dest_path = dirs::home_dir()
-                                                .map(|v| v.to_string_lossy().to_string());
-                                        }
-                                    }
-                                    let dest_path = dest_path.unwrap_or("/tmp".to_string());
-                                    let path = Path::new(&dest_path).join(f);
-                                    println!("path: {}", path.display());
-                                    let resp = match OpenOptions::new()
-                                        .write(true)
-                                        .create(true)
-                                        .open(&path)
-                                    {
-                                        Ok(_) => {
-                                            resp = Some(JSONRPCResponse::from_result(
-                                                id.unwrap(),
-                                                serde_json::to_value(CallToolsResult::new(Some(
-                                                    vec![ToolContent {
-                                                        tool_type: "file".to_string(),
-                                                        content: format!(
-                                                            "File created: {}",
-                                                            path.display()
-                                                        ),
-                                                    }],
-                                                )))
-                                                .ok(),
-                                            ))
-                                        }
-                                        Err(e) => {
-                                            resp = Some(JSONRPCResponse::from_error_message(
-                                                id,
-                                                INVALID_PARAMS,
-                                                format!("failed to open file: {}", e),
-                                            ))
-                                        }
-                                    };
-                                    resp
-                                } else {
-                                    resp = Some(JSONRPCResponse::from_error_message(
-                                        id,
-                                        INVALID_PARAMS,
-                                        "file is required".to_string(),
-                                    ))
-                                }
-                            } else {
-                                resp = Some(JSONRPCResponse::from_error_message(
-                                    id,
-                                    INVALID_PARAMS,
-                                    "arguments is required".to_string(),
-                                ))
-                            }
-                        } else {
-                            resp = Some(JSONRPCResponse::from_error_message(
-                                id,
-                                INVALID_PARAMS,
-                                format!("tool {} not found", params.name),
-                            ))
-                        }
-                    } else {
-                        resp = Some(JSONRPCResponse::from_error_message(
-                            id,
-                            INVALID_PARAMS,
-                            "failed to parse params".to_string(),
-                        ))
-                    }
-                } else {
-                    resp = Some(JSONRPCResponse::from_error_message(
-                        id,
-                        INVALID_PARAMS,
-                        "params is required".to_string(),
-                    ))
-                }
-            }
-            _ => {
+    for line_result in reader.lines() {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(e) => {
+                log_error(&format!("Failed to read line from stdin: {}", e));
                 on_error(
-                    &mut writer,
-                    id,
-                    METHOD_NOT_FOUND,
-                    format!("method {} not found", request.method),
+                    None,
+                    error_codes::INTERNAL_ERROR,
+                    &format!("Failed to read line from stdin: {}", e),
+                    &mut stdout,
                 );
                 continue;
             }
         };
 
-        if let Some(resp) = resp {
-            on_response(&mut writer, resp);
+        if line.trim().is_empty() {
+            continue;
         }
-        writer.flush().expect("Failed to flush output");
-        log("flushed\n", &[]);
-    }
 
-    log("exiting\n", &[]);
-}
+        let request_result: Result<Request, _> = serde_json::from_str(&line);
 
-fn on_error(writer: &mut impl Write, id: Option<JSONRPCId>, code: i32, message: String) {
-    let response = JSONRPCResponse::from_error_message(id, code, message);
-    on_response(writer, response);
-}
+        let req = match request_result {
+            Ok(req) => req,
+            Err(e) => {
+                on_error(
+                    None,
+                    error_codes::PARSE_ERROR,
+                    &format!("Failed to decode request: {}", e),
+                    &mut stdout,
+                );
+                continue;
+            }
+        };
 
-fn on_response(writer: &mut impl Write, response: JSONRPCResponse) {
-    let json_resp = match serde_json::to_string_pretty(&response) {
-        Ok(resp) => resp,
-        Err(err) => {
-            println!("failed to marshal response: {}", err);
-            return;
+        log_request(&req);
+
+        let id = req.id.clone();
+
+        if req.jsonrpc != "2.0" {
+            on_error(
+                id,
+                error_codes::INVALID_REQUEST,
+                "Invalid jsonrpc version",
+                &mut stdout,
+            );
+            continue;
         }
-    };
 
-    log(">> Response: {}\n", &[&json_resp]);
+        #[allow(unused_assignments)]
+        let mut resp: Option<Response> = None;
 
-    if let Err(err) = serde_json::to_writer(writer, &response) {
-        log("failed to encode response: {}", &[&err.to_string()]);
-    }
-}
+        match req.method.as_str() {
+            "initialize" => {
+                resp = Some(Response::new_result(
+                    id,
+                    json!(InitializeResult {
+                        protocol_version: "2024-11-05".to_string(),
+                        server_info: ServerInfo {
+                            name: "touch-mcp-server".to_string(),
+                            version: "1.0.0".to_string(),
+                        },
+                        capabilities: Capabilities {
+                            tools: HashMap::new(),
+                        },
+                    }),
+                ));
+            }
+            "notifications/initialized" | "initialized" => {
+                continue;
+            }
+            "tools/list" => {
+                let schema = json!({
+                    "type": "object",
+                    "properties": {
+                        "file": {
+                            "type":        "string",
+                            "description": "文件名 (Filename)"
+                        },
+                        "destPath": {
+                            "type":        "string",
+                            "description": "目标路径 (Destination path)"
+                        }
+                    },
+                    "required": ["file"]
+                });
+                resp = Some(Response::new_result(
+                    id,
+                    json!(ListToolsResult {
+                        tools: vec![Tool {
+                            name: "touch-mcp".to_string(),
+                            description: "创建文件工具 (Create file tool)".to_string(),
+                            input_schema: schema,
+                        }],
+                    }),
+                ));
+            }
+            "resources/list" => {
+                resp = Some(Response::new_result(
+                    id,
+                    json!(ListResourcesResult { resources: vec![] }),
+                ));
+            }
+            "prompts/list" => {
+                resp = Some(Response::new_result(
+                    id,
+                    json!(ListPromptsResult { prompts: vec![] }),
+                ));
+            }
+            "tools/call" => match req.params {
+                Some(params_value) => {
+                    match serde_json::from_value::<CallToolParams>(params_value) {
+                        Ok(params) => match params.name.as_str() {
+                            "touch-mcp" => match params.arguments {
+                                Some(args_value) => {
+                                    match serde_json::from_value::<TouchMcpArgs>(args_value) {
+                                        Ok(args) => {
+                                            if args.file.is_empty() {
+                                                on_error(
+                                                    id,
+                                                    error_codes::INVALID_PARAMS,
+                                                    "Missing or empty file name",
+                                                    &mut stdout,
+                                                );
+                                                continue;
+                                            }
 
-fn log(msg: &str, args: &[&str]) {
-    let log_path = "/Users/dp/touch-mcp-server.log";
+                                            let dest_path_str = args
+                                                .dest_path
+                                                .or_else(|| env::var("DEFAULT_TOUCH_PATH").ok())
+                                                .unwrap_or_else(|| {
+                                                    dirs::home_dir()
+                                                        .map(|p| p.to_string_lossy().into_owned())
+                                                        .unwrap_or_else(|| ".".to_string())
+                                                });
 
-    let file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .write(true)
-        .open(log_path);
+                                            let mut full_path =
+                                                PathBuf::from(dest_path_str.clone());
+                                            full_path.push(&args.file);
 
-    let mut file = match file {
-        Ok(file) => file,
-        Err(err) => {
-            println!("failed to open log file: {}", err);
-            return;
-        }
-    };
-
-    let formatted_msg = if args.is_empty() {
-        msg.to_string()
-    } else {
-        let mut result = msg.to_string();
-        for arg in args {
-            if let Some(pos) = result.find("{}") {
-                result.replace_range(pos..pos + 2, arg);
+                                            match File::create(&full_path) {
+                                                Ok(_) => {
+                                                    resp = Some(Response::new_result(
+                                                        id,
+                                                        json!(CallToolsResult {
+                                                            content: vec![ToolContent {
+                                                                content_type: "text".to_string(),
+                                                                text: format!(
+                                                                    "File {} created successfully at {}",
+                                                                    args.file, dest_path_str
+                                                                ),
+                                                            }],
+                                                        }),
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    on_error(
+                                                        id,
+                                                        error_codes::INTERNAL_ERROR,
+                                                        &format!(
+                                                            "Failed to create file '{}': {}",
+                                                            full_path.display(),
+                                                            e
+                                                        ),
+                                                        &mut stdout,
+                                                    );
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            on_error(
+                                                id,
+                                                error_codes::INVALID_PARAMS,
+                                                &format!(
+                                                    "Failed to parse 'touch-mcp' arguments: {}",
+                                                    e
+                                                ),
+                                                &mut stdout,
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+                                None => {
+                                    on_error(
+                                        id,
+                                        error_codes::INVALID_PARAMS,
+                                        "Missing 'arguments' for 'touch-mcp'",
+                                        &mut stdout,
+                                    );
+                                    continue;
+                                }
+                            },
+                            _ => {
+                                resp = Some(Response::new_error(
+                                    id,
+                                    error_codes::METHOD_NOT_FOUND,
+                                    format!("Tool '{}' not found", params.name),
+                                ));
+                            }
+                        },
+                        Err(e) => {
+                            on_error(
+                                id,
+                                error_codes::INVALID_PARAMS,
+                                &format!("Failed to parse 'tools/call' params: {}", e),
+                                &mut stdout,
+                            );
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    on_error(
+                        id,
+                        error_codes::INVALID_PARAMS,
+                        "Missing 'params' for 'tools/call'",
+                        &mut stdout,
+                    );
+                    continue;
+                }
+            },
+            "notifications/cancelled" | "cancelled" => {
+                continue;
+            }
+            _ => {
+                resp = Some(Response::new_error(
+                    id,
+                    error_codes::METHOD_NOT_FOUND,
+                    format!("Method '{}' not found", req.method),
+                ));
             }
         }
-        result
-    };
 
-    if let Err(err) = file.write_all(formatted_msg.as_bytes()) {
-        println!("failed to write to log file: {}", err);
+        if let Some(resp) = resp {
+            on_response(&resp, &mut stdout);
+        }
     }
+}
+
+fn on_error(id: Option<Value>, code: i64, message: &str, writer: &mut impl Write) {
+    let error_resp = Response::new_error(id, code, message.to_string());
+    on_response(&error_resp, writer);
+}
+
+fn on_response(resp: &Response, writer: &mut impl Write) {
+    if let Err(e) = serde_json::to_writer(&mut *writer, resp) {
+        log_error(&format!("Failed to encode response: {}", e));
+        return;
+    }
+    if let Err(e) = writer.write_all(b"\n") {
+        log_error(&format!("Failed to write newline: {}", e));
+        return;
+    }
+    if let Err(e) = writer.flush() {
+        log_error(&format!("Failed to flush stdout: {}", e));
+        return;
+    }
+    log_response(resp);
 }

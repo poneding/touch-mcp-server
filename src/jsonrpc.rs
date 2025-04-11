@@ -1,62 +1,61 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) enum Id {
-    Number(u64),
-    String(String),
-}
-
-pub(crate) type JSONRPCId = i32;
-
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct JSONRPCRequest {
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct Request {
     pub(crate) jsonrpc: String,
     pub(crate) method: String,
-    pub(crate) params: Option<serde_json::Value>,
-    // pub(crate) id: Option<serde_json::Value>,
-    pub(crate) id: Option<JSONRPCId>,
+    #[serde(default)]
+    pub(crate) params: Option<Value>,
+    pub(crate) id: Option<Value>,
 }
 
-#[derive(Debug, Serialize)]
-pub(crate) struct JSONRPCResponse {
-    pub(crate) jsonrpc: String,
-    pub(crate) result: Option<serde_json::Value>,
-    pub(crate) error: Option<JSONRPCError>,
-    pub(crate) id: Option<JSONRPCId>,
+#[derive(Serialize, Debug)]
+pub(crate) struct Response {
+    jsonrpc: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<ErrorObject>,
+    id: Option<Value>,
 }
 
-#[derive(Debug, Serialize)]
-pub(crate) struct JSONRPCError {
-    pub(crate) code: i32,
-    pub(crate) message: String,
-    pub(crate) data: Option<serde_json::Value>,
+#[derive(Serialize, Debug)]
+pub(crate) struct ErrorObject {
+    code: i64,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
 }
 
-pub(crate) const PARSE_ERROR: i32 = -32700;
-pub(crate) const INVALID_REQUEST: i32 = -32600;
-pub(crate) const METHOD_NOT_FOUND: i32 = -32601;
-pub(crate) const INVALID_PARAMS: i32 = -32602;
-pub(crate) const INTERNAL_ERROR: i32 = -32603;
-
-impl JSONRPCResponse {
-    pub(crate) fn from_result(id: JSONRPCId, result: Option<serde_json::Value>) -> Self {
-        JSONRPCResponse {
+impl Response {
+    pub(crate) fn new_result(id: Option<Value>, result: Value) -> Self {
+        Response {
             jsonrpc: "2.0".to_string(),
-            result,
+            result: Some(result),
             error: None,
-            id: Some(id),
+            id,
         }
     }
-    pub(crate) fn from_error_message(id: Option<JSONRPCId>, code: i32, err_msg: String) -> Self {
-        JSONRPCResponse {
+
+    pub(crate) fn new_error(id: Option<Value>, code: i64, message: String) -> Self {
+        Response {
             jsonrpc: "2.0".to_string(),
             result: None,
-            error: Some(JSONRPCError {
+            error: Some(ErrorObject {
                 code,
-                message: err_msg,
+                message,
                 data: None,
             }),
             id,
         }
     }
+}
+
+pub(crate) mod error_codes {
+    pub const PARSE_ERROR: i64 = -32700;
+    pub const INVALID_REQUEST: i64 = -32600;
+    pub const METHOD_NOT_FOUND: i64 = -32601;
+    pub const INVALID_PARAMS: i64 = -32602;
+    pub const INTERNAL_ERROR: i64 = -32603;
 }
